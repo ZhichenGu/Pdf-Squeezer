@@ -1,0 +1,23 @@
+name: Publish macOS release
+on:
+  push:
+    branches: [main]
+    paths: ['releases/*.md']
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency: publish-macos
+jobs:
+  release:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build app and ZIP
+        run: python3 scripts/build.py
+      - name: Publish version from Info.plist
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=$(plutil -extract CFBundleShortVersionString raw Resources/Info.plist)
+          tag="v$version"
+          gh release create "$tag" dist/*.zip dist/*.sha256 --target "$GITHUB_SHA" --title "PDF压缩 $tag" --notes-file "releases/$tag.md"
