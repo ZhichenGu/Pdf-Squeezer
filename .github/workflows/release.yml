@@ -12,11 +12,43 @@ jobs:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
+      - name: Check whether this version is already published
+        id: published
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PYTHON'
+          import json, os, plistlib, urllib.error, urllib.request
+          with open("Resources/Info.plist", "rb") as file:
+              tag = "v" + plistlib.load(file)["CFBundleShortVersionString"]
+          url = os.environ["GITHUB_API_URL"] + "/repos/" + os.environ["GITHUB_REPOSITORY"] + "/releases/tags/" + tag
+          request = urllib.request.Request(url, headers={"Authorization": "Bearer " + os.environ["GH_TOKEN"], "Accept": "application/vnd.github+json"})
+          try:
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  json.load(response)
+              exists = True
+          except urllib.error.HTTPError as error:
+              if error.code != 404:
+                  raise
+              exists = False
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write("exists=" + str(exists).lower() + "\n")
+          PYTHON
+      - name: Update published release notes
+        if: steps.published.outputs.exists == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=$(plutil -extract CFBundleShortVersionString raw Resources/Info.plist)
+          gh release edit "v$version" --notes-file "releases/v$version.md"
       - name: Build app and ZIP
+        if: steps.published.outputs.exists == 'false'
         run: python3 scripts/build.py
       - name: Check compression and recovery
+        if: steps.published.outputs.exists == 'false'
         run: bash scripts/test.sh
       - name: Publish version from Info.plist
+        if: steps.published.outputs.exists == 'false'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
