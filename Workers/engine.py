@@ -8,9 +8,11 @@ import shutil
 import sys
 import tempfile
 import zlib
+import signal
 from pathlib import Path
 
 from linkaudit import inventory
+from preflight import clean, analyze
 from PIL import Image
 from pypdf import PdfReader, PdfWriter, Transformation
 from pypdf.generic import ContentStream, DecodedStreamObject, NameObject, NumberObject
@@ -111,9 +113,13 @@ def run(src, dest, limit, dpi, quality, adaptive):
     if not len(reader.pages):
         raise ValueError("PDF 中没有页面。")
     original = os.stat(src).st_size
-    if original <= limit:
-        shutil.copyfile(src, dest)
-        return
+    print("分析 · " + analyze(reader), flush=True)
+    with tempfile.TemporaryDirectory(dir=str(Path(dest).parent)) as folder:
+        cleaned = Path(folder) / "clean.pdf"
+        removed = clean(reader, cleaned)
+        if cleaned.stat().st_size < original:
+            reader = PdfReader(io.BytesIO(cleaned.read_bytes()))
+        print(f"资源清理 · 移除 {removed} 个未使用图片或图形", flush=True)
     sizes = placements(reader)
     prepare(reader)
     sources = []
@@ -141,10 +147,18 @@ def run(src, dest, limit, dpi, quality, adaptive):
                 del obj["/SMask"]
     best = original
     shutil.copyfile(src,dest)
+    feasible = None
+    selected = (dpi, quality)
+    failed_scale = 1.0
+    passed_scale = None
+    scale = 1.0
+    initial_dpi, initial_quality = dpi, quality
     with tempfile.TemporaryDirectory(dir=str(Path(dest).parent)) as tmp:
         candidate = Path(tmp)/"candidate.pdf"
         # Try user settings first, then use the observed size to tune the next pass.
-        for attempt in range(6 if adaptive else 1):
+        for attempt in range(13 if adaptive else 1):
+            dpi = max(min(initial_dpi, 72), round(initial_dpi * scale))
+            quality = max(min(initial_quality, 45), round(initial_quality * scale))
             print(f"第 {attempt+1} 轮 · {dpi} DPI · 质量 {quality}%",flush=True)
             for obj,data,ow,oh,w,h,mode,filt,params,orig_filter in sources:
                 obj._data=data
@@ -177,13 +191,34 @@ def run(src, dest, limit, dpi, quality, adaptive):
             writer.compress_identical_objects()
             writer.write(candidate)
             size=candidate.stat().st_size
-            if size<best:
-                os.replace(candidate,dest)
-                best=size
-            if best<=limit or not sources or (dpi<=72 and quality<=45): break
-            factor=min(.87,max(.55,math.sqrt(limit/size)*.92))
-            dpi=max(min(dpi,72),round(dpi*factor))
-            quality=max(min(quality,45),quality-8)
+            if size <= limit:
+                # Highest feasible scale wins, even if its bytes exceed a lower-quality pass.
+                if passed_scale is None or scale > passed_scale:
+                    shutil.copyfile(candidate, dest)
+                    feasible = size
+                    selected = (dpi, quality)
+                    passed_scale = scale
+                if scale == 1 or failed_scale - passed_scale < .015:
+                    break
+                scale = (passed_scale + failed_scale) / 2
+            else:
+                if feasible is None and size < best:
+                    shutil.copyfile(candidate, dest)
+                    best = size
+                    selected = (dpi, quality)
+                failed_scale = scale
+                if passed_scale is not None:
+                    scale = (passed_scale + failed_scale) / 2
+                else:
+                    if not sources or (dpi <= 72 and quality <= 45):
+                        break
+                    scale *= min(.87, max(.55, math.sqrt(limit / size) * .97))
+            if not adaptive:
+                break
+    if os.stat(dest).st_size > original and original <= limit:
+        shutil.copyfile(src, dest)
+    dpi, quality = selected
+    print(f"结果 · {os.stat(dest).st_size} 字节 · {dpi} DPI · 质量 {quality}%", flush=True)
     verified=PdfReader(dest)
     if inventory(reader)!=inventory(verified):
         raise ValueError("链接目标校验失败，请保留原稿。")
@@ -191,6 +226,7 @@ def run(src, dest, limit, dpi, quality, adaptive):
         raise ValueError("结果校验失败。")
 
 if __name__=="__main__":
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
     try:
         run(sys.argv[1],sys.argv[2],int(sys.argv[3]),int(sys.argv[4]),int(sys.argv[5]),sys.argv[6]=="1")
     except Exception as exc:

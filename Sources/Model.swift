@@ -15,6 +15,8 @@ struct FileItem: Identifiable {
     let source: URL
     let bytes: Int64
     let pages: Int
+    var analysis = ""
+    var retryStrong = false
     var targetMB = "10"
     var checked = true
     var result: URL?
@@ -60,10 +62,12 @@ func runWorker(_ script: String, _ args: [String], progress: @escaping @Sendable
             if script != "linkaudit.py", let line = String(data:chunk, encoding:.utf8)?.trimmingCharacters(in:.whitespacesAndNewlines) { progress(line) }
         }
         process.waitUntilExit()
+        try Task.checkCancellation()
         let output = String(decoding:data,as:UTF8.self)
         guard process.terminationStatus == 0 else {
             throw NSError(domain:"worker",code:1,userInfo:[NSLocalizedDescriptionKey:output.split(separator:"\n").last.map(String.init) ?? "无法读取或处理这份 PDF。"])
         }
+        try Task.checkCancellation()
         return output
     }.value
     }, onCancel:{controller.cancel()})
@@ -100,7 +104,7 @@ struct EstimatePlan:Hashable {
     @Published var estimateURL:URL?
     @Published var estimateError=""
     var plan:EstimatePlan? {
-        guard let f=current,let target=limit else{return nil}
+        guard !busy,let f=current,let target=limit else{return nil}
         return EstimatePlan(file:f.id,target:target,dpi:Int(dpi),quality:Int(quality),modified:(try? f.source.resourceValues(forKeys:[.contentModificationDateKey]))?.contentModificationDate)
     }
     var validEstimate:URL? {estimateKey == plan ? estimateURL:nil}
@@ -111,24 +115,24 @@ struct EstimatePlan:Hashable {
         do {
             try await Task.sleep(for:.milliseconds(500))
             let url=temp.appendingPathComponent(UUID().uuidString+".pdf")
-            if f.bytes <= key.target {
-                estimateURL=f.source; estimateBytes=f.bytes; estimateKey=key; return
+            do {
+                _=try await runWorker("engine.py",[f.source.path,url.path,String(key.target),String(key.dpi),String(key.quality),"0"])
+            } catch {
+                try? FileManager.default.removeItem(at:url)
+                throw error
             }
-            _=try await runWorker("engine.py",[f.source.path,url.path,String(key.target),String(key.dpi),String(key.quality),"0"])
             guard !Task.isCancelled,key==plan else {try? FileManager.default.removeItem(at:url);return}
             estimateURL=url; estimateBytes=byteCount(url); estimateKey=key
         } catch { if !Task.isCancelled {estimateError="试压失败："+error.localizedDescription} }
     }
-    @Published var files: [FileItem] = []
+    @Published var files: [FileItem] = [] { didSet { persist() } }
     @Published var focus: UUID?
-    @Published var batchTarget = "10"
-    @Published var useTotal = false
-    @Published var totalMB = "20"
+    @Published var batchTarget = "10" { didSet { persist() } }
     @Published var batchSummary = ""
     @Published var warning:SizeWarning?
     var afterWarning:(()->Void)?
     func effectiveLimit(_ file:FileItem)->Int64? {
-        file.checked ? goals?[file.id]:bytesFromMB(file.targetMB)
+        bytesFromMB(file.targetMB)
     }
     func checkLimits(_ items:[FileItem]) -> SizeWarning? {
         let issues=items.compactMap{ f -> ExportIssue? in
@@ -137,9 +141,9 @@ struct EstimatePlan:Hashable {
         }
         return issues.isEmpty ? nil:SizeWarning(files:items,issues:issues)
     }
-    @Published var quality = 85.0
-    @Published var dpi = 180.0
-    @Published var adaptive = true
+    @Published var quality = 85.0 { didSet { persist() } }
+    @Published var dpi = 180.0 { didSet { persist() } }
+    @Published var adaptive = true { didSet { persist() } }
     @Published var busy = false
     @Published var active: UUID?
     @Published var progress = ""
@@ -147,8 +151,83 @@ struct EstimatePlan:Hashable {
     @Published var mode = "原稿"
     @Published var zoom = 1.0
     @Published var webChecks: Set<UUID> = []
-    let temp = FileManager.default.temporaryDirectory.appendingPathComponent("Paperpress-"+UUID().uuidString)
-    init() { try? FileManager.default.createDirectory(at:temp,withIntermediateDirectories:true) }
+    private var batchTask:Task<Void,Never>?
+    @Published var stopping = false
+    @Published var outputFolder = "" { didSet { persist() } }
+    @Published var memoryError = ""
+    private let defaults:UserDefaults
+    private var restoring = true
+    let temp:URL
+    init(defaults:UserDefaults = .standard, storage:URL? = nil) {
+        self.defaults = defaults
+        temp = storage ?? FileManager.default.urls(for:.applicationSupportDirectory,in:.userDomainMask)[0]
+            .appendingPathComponent("PDF-Squeezer/Results")
+        do { try FileManager.default.createDirectory(at:temp,withIntermediateDirectories:true) }
+        catch { memoryError="无法创建结果保存目录："+error.localizedDescription }
+        if let data=defaults.data(forKey:"session-v12"),let saved=try? JSONDecoder().decode(SavedSession.self,from:data) {
+            quality=min(98,max(45,saved.quality));dpi=saved.dpi
+            adaptive=saved.adaptive;batchTarget=saved.batchTarget
+            outputFolder=saved.outputFolder
+            for record in saved.files {
+                let source=URL(fileURLWithPath:record.path)
+                guard let doc=PDFDocument(url:source),!doc.isLocked,doc.pageCount>0 else {continue}
+                var file=FileItem(source:source,bytes:byteCount(source),pages:doc.pageCount)
+                file.targetMB=record.target;file.checked=record.checked
+                file.page=min(max(0,record.page),file.pages-1)
+                file.message=record.message == "处理失败" ? "处理失败":""
+                file.retryStrong=record.retryStrong ?? false
+                let unchanged=record.bytes==file.bytes && record.modified == modification(source)
+                if unchanged,let name=record.result, !name.contains("/"),name.hasSuffix(".pdf") {
+                    let result=temp.appendingPathComponent(name)
+                    if let resultDoc=PDFDocument(url:result),resultDoc.pageCount==file.pages {
+                        file.result=result;file.resultBytes=byteCount(result);file.limit=record.limit
+                    }
+                }
+                files.append(file)
+            }
+            focus=files.first?.id
+        }
+        restoring=false
+        for file in files { audit(file) }
+        pruneCache()
+    }
+    func persist() {
+        guard !restoring else{return}
+        let records=files.map {f in SavedFile(path:f.source.path,target:f.targetMB,checked:f.checked,
+            page:f.page,bytes:f.bytes,modified:modification(f.source),
+            result:f.result?.lastPathComponent,limit:f.limit,message:f.message,retryStrong:f.retryStrong)}
+        let state=SavedSession(quality:quality,dpi:dpi,adaptive:adaptive,batchTarget:batchTarget,
+            outputFolder:outputFolder,files:records)
+        if let data=try? JSONEncoder().encode(state) {defaults.set(data,forKey:"session-v12")}
+    }
+    func pruneCache() {
+        let keep=Set(files.compactMap{$0.result?.lastPathComponent} + [estimateURL?.lastPathComponent].compactMap{$0})
+        for url in (try? FileManager.default.contentsOfDirectory(at:temp,includingPropertiesForKeys:nil)) ?? [] {
+            if !keep.contains(url.lastPathComponent) {try? FileManager.default.removeItem(at:url)}
+        }
+    }
+    func stop() {
+        stopping=true
+        batchTask?.cancel()
+    }
+    func retryFailures() {
+        let failed=files.filter{$0.message=="处理失败"}
+        guard !failed.isEmpty else{return}
+        start(items:failed,retrying:true)
+    }
+    func audit(_ file:FileItem) {
+        Task {
+            do {
+                let output=try await runWorker("linkaudit.py",[file.source.path])
+                let links=try JSONDecoder().decode([LinkInfo].self,from:Data(output.utf8))
+                edit(file.id){$0.links=links;$0.audit=""}
+                let report=try await runWorker("preflight.py",[file.source.path])
+                if let object=try JSONSerialization.jsonObject(with:Data(report.utf8)) as? [String:String] {
+                    edit(file.id){$0.analysis=object["summary"] ?? ""}
+                }
+            } catch {edit(file.id){$0.audit="链接或文件分析读取失败"}}
+        }
+    }
     var current: FileItem? { files.first{$0.id==focus} }
     var checked: [FileItem] { files.filter(\.checked) }
     func bytesFromMB(_ target:String)->Int64? {
@@ -161,17 +240,11 @@ struct EstimatePlan:Hashable {
             guard let cap=bytesFromMB(file.targetMB) else{return nil}
             values[file.id]=cap
         }
-        guard useTotal else{return values}
-        guard let total=bytesFromMB(totalMB),total>=Int64(values.count) else{return nil}
-        for file in checked {values[file.id]=min(values[file.id]!,max(1,file.bytes))}
-        let sum=values.values.reduce(0,+)
-        guard sum>total else{return values}
-        let available=total-Int64(values.count)
-        return values.mapValues{1+Int64(floor(Double(available)*Double($0)/Double(sum)))}
+        return values
     }
     var limit:Int64? {
         guard let f=current else{return nil}
-        return f.checked ? goals?[f.id]:bytesFromMB(f.targetMB)
+        return bytesFromMB(f.targetMB)
     }
     func applyBatchTarget() {
         guard bytesFromMB(batchTarget) != nil else{return}
@@ -201,50 +274,59 @@ struct EstimatePlan:Hashable {
             let item=FileItem(source:u,bytes:byteCount(u),pages:doc.pageCount)
             files.append(item)
             if current == nil { focusOn(item) }
-            Task {
-                do {
-                    let output=try await runWorker("linkaudit.py",[u.path])
-                    let links=try JSONDecoder().decode([LinkInfo].self,from:Data(output.utf8))
-                    edit(item.id){$0.links=links; $0.audit=""}
-                } catch { edit(item.id){$0.audit="链接读取失败"} }
-            }
+            audit(item)
         }
         if !failed.isEmpty { notice="无法打开或需要解锁："+failed.joined(separator:"、") }
     }
-    func start() {
-        guard !busy,let goals=goals,!checked.isEmpty else { return }
-        let list=checked, settings=[String(Int(dpi)),String(Int(quality)),adaptive ? "1":"0"]
-        busy=true;batchSummary=""
-        let totalBudget=useTotal ? bytesFromMB(totalMB):nil
-        Task {
+    func start(items:[FileItem]? = nil, retrying:Bool = false) {
+        guard !busy,let goals=goals else { return }
+        let list=items ?? checked
+        guard !list.isEmpty else{return}
+        let settings=[String(Int(dpi)),String(Int(quality)),adaptive ? "1":"0"]
+        if mode=="试压" {mode="原稿"}
+        busy=true;stopping=false;batchSummary=""
+        batchTask=Task {
+            var failures=[String]()
+            var completedIDs=Set<UUID>()
             for (idx,f) in list.enumerated() {
-                guard let goal=goals[f.id] else{continue}
+                if Task.isCancelled {break}
+                guard let goal=goals[f.id] ?? bytesFromMB(f.targetMB) else{continue}
                 active=f.id
                 let prefix="\(idx+1)/\(list.count)"
                 progress="\(prefix) · 读取 PDF"
-                edit(f.id){$0.message="处理中"}
+                let strong=retrying && f.retryStrong
+                edit(f.id){$0.message="处理中";$0.retryStrong=strong}
                 let out=temp.appendingPathComponent(UUID().uuidString+".pdf")
                 do {
-                    if let key=estimateKey,key.file==f.id,key.target==goal,key.dpi==Int(dpi),key.quality==Int(quality),key.modified==(try? f.source.resourceValues(forKeys:[.contentModificationDateKey]))?.contentModificationDate,let cached=estimateURL,let size=estimateBytes,(size<=goal || !adaptive) {
+                    if !strong,let key=estimateKey,key.file==f.id,key.target==goal,key.dpi==Int(dpi),key.quality==Int(quality),key.modified==(try? f.source.resourceValues(forKeys:[.contentModificationDateKey]))?.contentModificationDate,let cached=estimateURL,estimateBytes != nil,!adaptive {
                         try FileManager.default.copyItem(at:cached,to:out)
-                    } else { _=try await runWorker("engine.py",[f.source.path,out.path,String(goal)]+settings){line in
+                    } else {
+                        let script=strong ? "strong.py":"engine.py"
+                        let arguments=[f.source.path,out.path,String(goal)]+(strong ? []:settings)
+                        _=try await runWorker(script,arguments){line in
                         Task { @MainActor in if self.active==f.id {self.progress=prefix+" · "+line} }
                     }
                     }
+                    try Task.checkCancellation()
                     guard let doc=PDFDocument(url:out),doc.pageCount==f.pages else { throw NSError(domain:"PDF",code:2,userInfo:[NSLocalizedDescriptionKey:"输出文档校验失败"]) }
                     edit(f.id){$0.result=out; $0.resultBytes=byteCount(out); $0.limit=goal; $0.message=""}
+                    completedIDs.insert(f.id)
                     if focus==f.id {mode="对比"}
                 } catch {
-                    edit(f.id){$0.message="处理失败"; $0.result=nil}
-                    notice=f.source.lastPathComponent+"："+error.localizedDescription
+                    try? FileManager.default.removeItem(at:out)
+                    if Task.isCancelled {edit(f.id){$0.message="已停止"};break}
+                    edit(f.id){$0.message="处理失败"}
+                    failures.append(f.source.lastPathComponent+"："+error.localizedDescription)
                 }
             }
-            let completed=files.filter{goals[$0.id] != nil && $0.result != nil}
+            let completed=files.filter{completedIDs.contains($0.id)}
             let bytes=completed.reduce(Int64(0)){$0+$1.resultBytes}
             batchSummary="本次完成 \(completed.count)/\(list.count) 份 · 合计 "+sizeText(bytes)
-            if let budget=totalBudget {batchSummary += completed.count != list.count ? "（部分完成）":(bytes<=budget ? "（总量达标）":"（超过合计上限）")}
-            active=nil; busy=false; progress=""
-            if notice.isEmpty {warning=checkLimits(completed)}
+            if Task.isCancelled {batchSummary="已停止 · "+batchSummary}
+            active=nil; busy=false; stopping=false; progress=""; batchTask=nil
+            if !failures.isEmpty {notice=failures.joined(separator:"\n")}
+            else if !Task.isCancelled {warning=checkLimits(completed)}
+            persist();pruneCache()
         }
     }
     func export(_ items:[FileItem]) {
@@ -258,21 +340,23 @@ struct EstimatePlan:Hashable {
     }
     func force(_ request:SizeWarning) {
         guard !busy else{return}
-        busy=true
+        busy=true;stopping=false
         focusOn(request.issues[0].file)
-        Task {
+        batchTask=Task {
             var failures=[String]()
             for (i,issue) in request.issues.enumerated() {
+                if Task.isCancelled {break}
                 let file=issue.file
                 let out=temp.appendingPathComponent(UUID().uuidString+".pdf")
                 active=file.id
                 let prefix="强压 \(i+1)/\(request.issues.count)"
                 progress=prefix+" · 渲染页面"
-                edit(file.id){$0.message="强压中"}
+                edit(file.id){$0.message="强压中";$0.retryStrong=true}
                 do {
                     _=try await runWorker("strong.py",[file.source.path,out.path,String(issue.target)]){line in
                         Task {@MainActor in if self.active==file.id {self.progress=prefix+" · "+line} }
                     }
+                    try Task.checkCancellation()
                     let bytes=byteCount(out)
                     guard bytes>0,bytes<=issue.target,let doc=PDFDocument(url:out),doc.pageCount==file.pages else {
                         throw NSError(domain:"PDF",code:2,userInfo:[NSLocalizedDescriptionKey:"强压结果未通过大小或页数校验。"])
@@ -280,21 +364,26 @@ struct EstimatePlan:Hashable {
                     edit(file.id){$0.result=out; $0.resultBytes=bytes; $0.limit=issue.target; $0.message=""}
                 } catch {
                     try? FileManager.default.removeItem(at:out)
-                    edit(file.id){$0.message=""}
+                    if Task.isCancelled {edit(file.id){$0.message="已停止"};break}
+                    edit(file.id){$0.message="处理失败"}
                     failures.append(file.source.lastPathComponent+"："+error.localizedDescription)
                 }
             }
             let ids=Set(request.files.map(\.id))
             let sum=files.filter{ids.contains($0.id)}.reduce(Int64(0)){$0+$1.resultBytes}
             batchSummary="强压达标 \(request.issues.count-failures.count)/\(request.issues.count) 份 · 本组共 "+sizeText(sum)
-            active=nil;busy=false;progress="";mode="对比"
+            if Task.isCancelled {batchSummary="已停止 · 已有成品可继续导出"}
+            active=nil;busy=false;stopping=false;progress="";mode="对比";batchTask=nil
             if !failures.isEmpty {notice=failures.joined(separator:"\n")}
+            persist();pruneCache()
         }
     }
     func saveResults(_ ready:[FileItem]) {
         let panel=NSOpenPanel(); panel.canChooseFiles=false; panel.canChooseDirectories=true; panel.canCreateDirectories=true
         panel.prompt="导出到此处"
+        if !outputFolder.isEmpty {panel.directoryURL=URL(fileURLWithPath:outputFolder)}
         guard panel.runModal() == .OK,let dir=panel.url else { return }
+        outputFolder=dir.path
         do {
             for f in ready {
                 let title=f.source.deletingPathExtension().lastPathComponent+"（压缩版）"
@@ -347,4 +436,28 @@ func probe(_ url:URL) async -> (String,Bool) {
         } catch { if method=="GET" {return ("连接失败 · "+error.localizedDescription,true)} }
     }
     return ("无法确认",true)
+}
+
+private func modification(_ url:URL)->Date? {
+    (try? url.resourceValues(forKeys:[.contentModificationDateKey]))?.contentModificationDate
+}
+private struct SavedFile:Codable {
+    let path:String
+    let target:String
+    let checked:Bool
+    let page:Int
+    let bytes:Int64
+    let modified:Date?
+    let result:String?
+    let limit:Int64
+    let message:String?
+    let retryStrong:Bool?
+}
+private struct SavedSession:Codable {
+    let quality:Double
+    let dpi:Double
+    let adaptive:Bool
+    let batchTarget:String
+    let outputFolder:String
+    let files:[SavedFile]
 }

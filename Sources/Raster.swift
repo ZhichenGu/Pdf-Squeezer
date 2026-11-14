@@ -6,6 +6,8 @@ import UniformTypeIdentifiers
 func renderPages(_ file: URL, directory: URL) throws {
     guard let document = CGPDFDocument(file as CFURL) else { throw CocoaError(.fileReadCorruptFile) }
     for index in 1...document.numberOfPages {
+        print("渲染页面 · \(index)/\(document.numberOfPages)")
+        fflush(stdout)
         try autoreleasepool {
             guard let page = document.page(at: index) else { throw CocoaError(.fileReadCorruptFile) }
             let box = page.getBoxRect(.cropBox)

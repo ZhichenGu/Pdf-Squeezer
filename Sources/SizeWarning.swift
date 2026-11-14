@@ -33,8 +33,11 @@ struct SizeWarningPanel:View {
                     }
                 }
             }.frame(height:min(CGFloat(warning.issues.count)*59,190))
+            if let summary=warning.issues.first?.file.analysis, !summary.isEmpty {
+                Text("文件组成 · "+summary).font(.caption).foregroundStyle(.secondary)
+            }
             Divider()
-            Text("强力压缩会把页面画面转为图片，保留可搜索文字和链接。放大时细节可能变软，完成后可先对比再导出。")
+            Text("强力压缩会先清理资源并尝试保留矢量。仍超标时将页面画面转为图片，保留可搜索文字和链接，放大时细节可能变软。完成后可先对比再导出。")
                 .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
             HStack {
                 Button("取消",action:cancel).keyboardShortcut(.cancelAction)

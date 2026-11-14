@@ -34,8 +34,12 @@ struct SettingsPanel:View {
             }.labelsHidden().frame(width:110)}
             Divider()
             Toggle("按目标大小自动调整",isOn:$desk.adaptive).toggleStyle(.switch)
-            Text(desk.adaptive ? "从所选质量和分辨率开始，逐步降低图片精度，直到达标或达到下限。":"按所选参数压缩一次，保留实际结果供预览。")
+            Text(desk.adaptive ? "从所选参数开始，搜索目标内尽可能高的画质。":"按所选参数压缩一次，保留实际结果供预览。")
                 .font(.caption).foregroundStyle(muted).fixedSize(horizontal:false,vertical:true)
+            Text("参数和任务自动保存，下次打开可继续。").font(.caption).foregroundStyle(muted)
+            if !desk.outputFolder.isEmpty {
+                Text("导出目录 "+URL(fileURLWithPath:desk.outputFolder).lastPathComponent).font(.caption).foregroundStyle(muted)
+            }
             Divider()
             SizeEstimate(desk:desk, expanded:true)
         }.padding(20).frame(width:300)
@@ -54,7 +58,7 @@ struct SizeEstimate:View {
                 if desk.plan == desk.estimateKey, let bytes=desk.estimateBytes {
                     Text(sizeText(f.bytes)+" → "+sizeText(bytes)).font(.system(size:12,weight:.semibold)).monospacedDigit().foregroundStyle(teal)
                     if expanded {
-                        Text(f.bytes <= (desk.limit ?? 0) ? "原文件已达标，保留原始质量。":(desk.adaptive && bytes > (desk.limit ?? 0) ? "按当前参数仍超标，正式压缩时会继续调整。":"按当前质量和分辨率计算。")).font(.caption).foregroundStyle(muted)
+                        Text(desk.adaptive && bytes > (desk.limit ?? 0) ? "按当前参数仍超标，正式压缩时会继续调整。":"按当前质量和分辨率计算，已达标文件也会试压。").font(.caption).foregroundStyle(muted)
                         Button("查看试压对比"){desk.mode="试压";dismiss()}.disabled(desk.estimateURL==nil)
                     }
                 } else if expanded {
@@ -90,7 +94,7 @@ struct DeskView:View {
             }.padding(.horizontal,22).frame(height:61)
             Divider()
             HStack(spacing:0) {
-                sidebar.frame(width:292)
+                sidebar.frame(width:326)
                 Divider()
                 right.frame(maxWidth:.infinity,maxHeight:.infinity)
             }
@@ -118,30 +122,40 @@ struct DeskView:View {
                 Spacer()
                 Button("添加…"){desk.choose()}.buttonStyle(.borderless)
             }.padding(.horizontal,18).padding(.top,19)
+            if desk.files.isEmpty {
             Button {desk.choose()} label:{
                 VStack(spacing:7){Image(systemName:"tray.and.arrow.down").font(.title2);Text("拖入 PDF 或点此选择").font(.system(size:12,weight:.medium))}
                     .foregroundStyle(teal).frame(maxWidth:.infinity).frame(height:79)
                     .background(hover ? mint:mint.opacity(0.37),in:RoundedRectangle(cornerRadius:9))
                     .overlay(RoundedRectangle(cornerRadius:9).strokeBorder(teal.opacity(0.45),style:StrokeStyle(lineWidth:1,dash:[4,4])))
             }.buttonStyle(.plain).padding(.horizontal,15).padding(.vertical,14)
+            }
             if !desk.files.isEmpty {
                 HStack {
-                    Toggle("全选",isOn:Binding(get:{desk.checked.count==desk.files.count},set:{v in for i in desk.files.indices {desk.files[i].checked=v}})).toggleStyle(.checkbox)
+                    Toggle("全选",isOn:Binding(get:{desk.checked.count==desk.files.count},set:{v in for i in desk.files.indices {desk.files[i].checked=v}})).toggleStyle(.checkbox).disabled(desk.busy)
                     Spacer();Text("已选 \(desk.checked.count) 份").font(.caption).foregroundStyle(muted)
-                }.padding(.horizontal,19).padding(.bottom,9)
+                }.padding(.horizontal,19).padding(.top,14).padding(.bottom,9)
             }
             ScrollView{
                 LazyVStack(spacing:4){
                     ForEach(desk.files){f in
                         HStack(spacing:9){
-                            Toggle("",isOn:Binding(get:{f.checked},set:{v in desk.edit(f.id){$0.checked=v}})).labelsHidden().toggleStyle(.checkbox)
+                            Toggle("",isOn:Binding(get:{f.checked},set:{v in desk.edit(f.id){$0.checked=v}})).labelsHidden().toggleStyle(.checkbox).disabled(desk.busy)
                             Button {desk.focusOn(f)} label:{
                                 VStack(alignment:.leading,spacing:6){
                                     Text(f.source.lastPathComponent).font(.system(size:13,weight:.medium)).lineLimit(1).truncationMode(.middle)
-                                    HStack(spacing:5){Text(sizeText(f.bytes));Text("·");Text("目标 "+f.targetMB+" MB");Text("·");Text(f.result != nil && f.message.isEmpty ? (f.resultBytes <= (desk.effectiveLimit(f) ?? 0) ? "已达标":"未达目标"):f.status).foregroundStyle(f.result == nil ? muted:teal)}
+                                    HStack(spacing:5){Text(sizeText(f.bytes));Text("·");Text(f.result != nil && f.message.isEmpty ? (f.resultBytes <= (desk.effectiveLimit(f) ?? 0) ? "已达标":"未达目标"):f.status).foregroundStyle(f.result == nil ? muted:teal)}
                                         .font(.caption).foregroundStyle(muted)
                                 }.frame(maxWidth:.infinity,alignment:.leading).contentShape(Rectangle())
                             }.buttonStyle(.plain)
+                            VStack(alignment:.leading,spacing:4) {
+                                Text("目标 MB").font(.system(size:10)).foregroundStyle(muted)
+                                TextField("10",text:Binding(
+                                    get:{desk.files.first(where:{$0.id==f.id})?.targetMB ?? ""},
+                                    set:{value in desk.edit(f.id){$0.targetMB=value}}))
+                                    .textFieldStyle(.roundedBorder).frame(width:62).disabled(desk.busy)
+                                    .accessibilityLabel(f.source.lastPathComponent+" 目标 MB")
+                            }
                             Button {desk.remove(f.id)}label:{Image(systemName:"xmark").font(.caption2)}.buttonStyle(.plain).disabled(desk.busy).help("从队列移除")
                         }.padding(.horizontal,10).padding(.vertical,10).background(desk.focus==f.id ? mint:Color.clear,in:RoundedRectangle(cornerRadius:6))
                     }
@@ -161,14 +175,17 @@ struct DeskView:View {
                         }.padding(18)
                     }
                 }
-                Toggle("限制所选文件的合计大小",isOn:$desk.useTotal).toggleStyle(.checkbox).disabled(desk.busy)
-                if desk.useTotal {
-                    HStack {Text("合计上限");TextField("20",text:$desk.totalMB).frame(width:73);Text("MB")}.font(.caption).disabled(desk.busy)
-                }
                 if !desk.batchSummary.isEmpty {Text(desk.batchSummary).font(.caption).foregroundStyle(muted)}
                 if desk.estimateBytes != nil && desk.estimateKey == desk.plan { SizeEstimate(desk:desk,expanded:false) }
-                if desk.busy {HStack {ProgressView().controlSize(.mini);Text(desk.progress).font(.caption).foregroundStyle(muted)}}
-                if desk.goals==nil {Text("请检查所选文件的目标和合计上限。").font(.caption).foregroundStyle(.red)}
+                if desk.busy {
+                    HStack {ProgressView().controlSize(.mini);Text(desk.progress).font(.caption).foregroundStyle(muted).lineLimit(3)}
+                    Button(desk.stopping ? "正在停止…":"停止任务"){desk.stop()}.disabled(desk.stopping)
+                }
+                if desk.files.contains(where:{$0.message=="处理失败"}) {
+                    Button("重试失败文件"){desk.retryFailures()}.disabled(desk.busy)
+                }
+                if !desk.memoryError.isEmpty {Text(desk.memoryError).font(.caption).foregroundStyle(.orange)}
+                if desk.goals==nil {Text("请检查每份文件的目标大小。").font(.caption).foregroundStyle(.red)}
                 Button {desk.start()} label:{
                     Label(desk.busy ? "正在压缩":"压缩所选文件"+(desk.checked.isEmpty ? "":"（\(desk.checked.count)）"),systemImage:"arrow.down.right.and.arrow.up.left")
                         .font(.system(size:13,weight:.semibold)).frame(maxWidth:.infinity).frame(height:37)
@@ -190,18 +207,16 @@ struct DeskView:View {
                         Text("\(f.pages) 页  ·  \(sizeText(f.bytes))").font(.caption).foregroundStyle(muted)
                     }
                     Spacer()
-                    HStack(spacing:4){
-                        Text("单份目标").font(.caption).foregroundStyle(muted)
-                        TextField("10",text:Binding(get:{desk.files.first(where:{$0.id==f.id})?.targetMB ?? ""},set:{v in desk.edit(f.id){$0.targetMB=v}})).frame(width:54).disabled(desk.busy)
-                        Text("MB").font(.caption).foregroundStyle(muted)
-                    }
                     Button {showLinks=true} label:{Label(f.links.contains(where:{$0.problem}) ? "链接异常 \(f.links.filter{$0.problem}.count)":"链接 \(f.links.count)",systemImage:f.links.contains(where:{$0.problem}) ? "exclamationmark.triangle.fill":"link")}
                 }.padding(.horizontal,19).frame(height:65)
+                if !f.analysis.isEmpty {
+                    Text("文件组成（数据流） · "+f.analysis).font(.caption).foregroundStyle(muted)
+                        .frame(maxWidth:.infinity,alignment:.leading).padding(.horizontal,19).padding(.bottom,8)
+                }
                 Divider()
                 HStack {
                     if f.result != nil || desk.validEstimate != nil {Picker("",selection:$desk.mode){ForEach(["原稿"]+(desk.validEstimate != nil ? ["试压"]:[])+(f.result != nil ? ["对比","成品"]:[]),id:\.self){Text($0)}}.pickerStyle(.segmented).labelsHidden().frame(width:200)}
                     else {Label("原稿预览",systemImage:"doc.text").font(.caption.weight(.medium)).foregroundStyle(muted)}
-                    if desk.useTotal,f.checked,let goal=desk.limit {Text("分配 "+sizeText(goal)).font(.caption2).foregroundStyle(teal)}
                     Spacer()
                     Button {desk.zoom=max(1,desk.zoom-0.5)} label:{Image(systemName:"minus.magnifyingglass")}.disabled(desk.zoom<=1)
                     Text(desk.zoom==1 ? "适合页面":"\(Int(desk.zoom*100))%").font(.caption).frame(width:54)
@@ -247,7 +262,7 @@ struct DeskView:View {
     var body:some Scene {
         Window("PDF压缩",id:"desk"){DeskView(desk:desk)
             .onOpenURL{desk.add([$0])}
-            .onReceive(NotificationCenter.default.publisher(for:NSApplication.willTerminateNotification)){_ in try? FileManager.default.removeItem(at:desk.temp)}
+            .onReceive(NotificationCenter.default.publisher(for:NSApplication.willTerminateNotification)){_ in desk.stop();desk.persist()}
         }.defaultSize(width:1090,height:728)
         .commands {CommandGroup(after:.newItem){Button("添加 PDF…"){desk.choose()}.keyboardShortcut("o")}}
     }

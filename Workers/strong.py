@@ -10,6 +10,9 @@ from pypdf import PdfReader, PdfWriter
 from pypdf.generic import (ContentStream, DecodedStreamObject, DictionaryObject,
                            NameObject as N, NumberObject)
 from linkaudit import inventory
+from engine import run as optimize
+import os
+import signal
 
 TEXT_OPS = set(b"q Q cm BT ET Tf Tc Tw Tz TL Ts Td TD Tm T* Tj TJ ' \" BMC BDC EMC MP DP".split())
 
@@ -56,11 +59,24 @@ def text_layer(stream, resources, reader, parents=()):
 
 
 def run(src, out, cap):
+    print("强压前优化 · 先清理资源并尝试保留矢量", flush=True)
+    optimize(src, out, cap, 180, 85, True)
+    if out.stat().st_size <= cap:
+        print("结构优化已达标 · 保留文字和矢量", flush=True)
+        return
     reader=PdfReader(src)
     original_links=inventory(reader)
     with tempfile.TemporaryDirectory(dir=out.parent) as temp:
         tmp=Path(temp)
-        subprocess.run([Path(__file__).with_name("PageRender"),src,tmp],check=True)
+        print("结构优化仍超标 · 开始逐页渲染", flush=True)
+        child = subprocess.Popen([Path(__file__).with_name("PageRender"), src, tmp])
+        try:
+            if child.wait() != 0:
+                raise ValueError("页面渲染失败")
+        finally:
+            if child.poll() is None:
+                child.terminate()
+                child.wait()
         images=[]
         for index,page in enumerate(reader.pages,1):
             contents=page.get_contents()
@@ -110,6 +126,7 @@ def run(src, out, cap):
         raise ValueError("已达到强压下限，仍无法满足目标。可调整目标或导出之前的结果。")
 
 if __name__=="__main__":
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
     logging.getLogger("pypdf").setLevel(logging.ERROR)
     try: run(Path(sys.argv[1]),Path(sys.argv[2]),int(sys.argv[3]))
     except Exception as exc:
