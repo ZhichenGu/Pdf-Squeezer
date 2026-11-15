@@ -26,6 +26,17 @@ import PDFKit
         desk.start()
         try await wait(desk)
         precondition(desk.files[0].result != nil && desk.files[0].message.isEmpty)
+        let exportDirectory=root.appendingPathComponent("export-"+UUID().uuidString)
+        try FileManager.default.createDirectory(at:exportDirectory,withIntermediateDirectories:true)
+        defer {try? FileManager.default.removeItem(at:exportDirectory)}
+        desk.saveResults(desk.files,to:exportDirectory)
+        precondition(desk.notice.isEmpty && desk.exportMessage=="已导出 1 份 PDF")
+        let saved=exportDirectory.appendingPathComponent("model（压缩版）.pdf")
+        let savedData=try Data(contentsOf:saved)
+        let resultData=try Data(contentsOf:desk.files[0].result!)
+        precondition(savedData==resultData)
+        desk.saveResults(desk.files,to:exportDirectory)
+        precondition(FileManager.default.fileExists(atPath:exportDirectory.appendingPathComponent("model（压缩版）-2.pdf").path))
         let existing=desk.files[0].result
         // A failed re-run must retain the last successful output.
         let original=try Data(contentsOf:source)
@@ -36,7 +47,7 @@ import PDFKit
         precondition(desk.files[0].result==existing)
         try original.write(to:source)
         desk.notice=""
-        desk.retryFailures()
+        desk.retry(desk.files[0])
         try await wait(desk)
         precondition(desk.files[0].message.isEmpty)
         desk.adaptive=true
@@ -48,6 +59,10 @@ import PDFKit
         precondition(desk.files[0].message=="已停止")
         precondition(desk.files[0].result != nil)
         desk.notice=""
+        desk.edit(desk.files[0].id){$0.targetMB="0.000001"}
+        desk.export(desk.files)
+        precondition(desk.warning?.issues.count==1 && desk.warning?.issues.first?.target==1)
+        desk.warning=nil
         let issue=ExportIssue(file:desk.files[0],target:1)
         desk.force(SizeWarning(files:desk.files,issues:[issue]))
         try await wait(desk)
@@ -70,6 +85,6 @@ import PDFKit
         try Data("replaced".utf8).write(to:source)
         let invalidated=Desk(defaults:defaults,storage:desk.temp)
         precondition(invalidated.files.isEmpty)
-        print("PASS settings, trial, failure recovery, retry, cancellation, session restoration")
+        print("PASS settings, trial, export feedback and collision, failure recovery, row retry, cancellation, session restoration")
     }
 }

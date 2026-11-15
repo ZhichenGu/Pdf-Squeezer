@@ -148,6 +148,8 @@ struct EstimatePlan:Hashable {
     @Published var active: UUID?
     @Published var progress = ""
     @Published var notice = ""
+    @Published var exportMessage = ""
+    private var exportedFiles:[URL] = []
     @Published var mode = "原稿"
     @Published var zoom = 1.0
     @Published var webChecks: Set<UUID> = []
@@ -209,6 +211,9 @@ struct EstimatePlan:Hashable {
     func stop() {
         stopping=true
         batchTask?.cancel()
+    }
+    func retry(_ file:FileItem) {
+        start(items:[file],retrying:true)
     }
     func retryFailures() {
         let failed=files.filter{$0.message=="处理失败"}
@@ -279,9 +284,12 @@ struct EstimatePlan:Hashable {
         if !failed.isEmpty { notice="无法打开或需要解锁："+failed.joined(separator:"、") }
     }
     func start(items:[FileItem]? = nil, retrying:Bool = false) {
-        guard !busy,let goals=goals else { return }
+        guard !busy else { return }
         let list=items ?? checked
         guard !list.isEmpty else{return}
+        let targets=list.compactMap { file in bytesFromMB(file.targetMB).map { (file.id,$0) } }
+        guard targets.count == list.count else {return}
+        let goals=Dictionary(uniqueKeysWithValues:targets)
         let settings=[String(Int(dpi)),String(Int(quality)),adaptive ? "1":"0"]
         if mode=="试压" {mode="原稿"}
         busy=true;stopping=false;batchSummary=""
@@ -325,7 +333,6 @@ struct EstimatePlan:Hashable {
             if Task.isCancelled {batchSummary="已停止 · "+batchSummary}
             active=nil; busy=false; stopping=false; progress=""; batchTask=nil
             if !failures.isEmpty {notice=failures.joined(separator:"\n")}
-            else if !Task.isCancelled {warning=checkLimits(completed)}
             persist();pruneCache()
         }
     }
@@ -384,19 +391,39 @@ struct EstimatePlan:Hashable {
         if !outputFolder.isEmpty {panel.directoryURL=URL(fileURLWithPath:outputFolder)}
         guard panel.runModal() == .OK,let dir=panel.url else { return }
         outputFolder=dir.path
+        saveResults(ready,to:dir)
+    }
+    func saveResults(_ ready:[FileItem],to directory:URL) {
+        exportedFiles=[]
+        exportMessage=""
         do {
-            for f in ready {
-                let title=f.source.deletingPathExtension().lastPathComponent+"（压缩版）"
-                var i=1
+            for file in ready {
+                guard let result=file.result else {continue}
+                let title=file.source.deletingPathExtension().lastPathComponent+"（压缩版）"
+                var number=1
                 while true {
-                    let name=i==1 ? title : title+"-"+String(i)
-                    do { try FileManager.default.copyItem(at:f.result!,to:dir.appendingPathComponent(name+".pdf"));break }
-                    catch let error as NSError where error.domain==NSCocoaErrorDomain && error.code==NSFileWriteFileExistsError { i+=1 }
+                    let name=number==1 ? title:title+"-"+String(number)
+                    let target=directory.appendingPathComponent(name+".pdf")
+                    do {
+                        try FileManager.default.copyItem(at:result,to:target)
+                        exportedFiles.append(target)
+                        break
+                    } catch let error as NSError where error.domain==NSCocoaErrorDomain && error.code==NSFileWriteFileExistsError {
+                        number+=1
+                    }
                 }
             }
-            notice="已导出 \(ready.count) 份 PDF 至「\(dir.lastPathComponent)」。"
-        } catch { notice=error.localizedDescription }
+            exportMessage="已导出 \(exportedFiles.count) 份 PDF"
+        } catch {
+            if !exportedFiles.isEmpty {exportMessage="已导出 \(exportedFiles.count) 份，其余文件导出失败"}
+            notice=error.localizedDescription
+        }
     }
+    func revealExport() {
+        guard !exportedFiles.isEmpty else{return}
+        NSWorkspace.shared.activateFileViewerSelecting(exportedFiles)
+    }
+
     func checkWeb(_ f:FileItem) {
         guard !webChecks.contains(f.id) else {return}
         webChecks.insert(f.id)

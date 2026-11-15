@@ -15,6 +15,7 @@ struct PreviewKey: Hashable {
     let scale:Int
 }
 struct Shots {
+    let key:PreviewKey
     let before:NSImage
     let after:NSImage?
 }
@@ -26,42 +27,65 @@ struct PreviewCanvas:View {
     @State private var shots:Shots?
     @State private var position=0.5
     @State private var failed=false
+    @State private var loading=false
+    @State private var renderingKey:PreviewKey?
+    @State private var dragOrigin:Double?
     @Environment(\.displayScale) var screenScale
     var body:some View {
         GeometryReader { geo in
             let width=max(100,geo.size.width-60), height=max(100,geo.size.height-60)
             let resolution=Int(min(6000,ceil(max(width,height)*zoom*screenScale/256)*256))
             let key=PreviewKey(original:f.source,result:mode=="试压" ? draft:f.result,page:f.page,scale:resolution)
+            let currentFailure=failed && renderingKey == key
+            let displayed=shots.flatMap { value in
+                value.key.original == key.original && value.key.page == key.page ? value:nil
+            }
             ZStack {
                 field
-                if let shots {
+                if let shots=displayed {
+                    let sameResult=shots.key.result == key.result
                     let image=shots.before
                     let fit=min(width/image.size.width,height/image.size.height)*zoom
                     let w=image.size.width*fit,h=image.size.height*fit
                     ScrollView([.horizontal,.vertical]) {
                         ZStack(alignment:.leading) {
-                            Image(nsImage:mode=="成品" ? shots.after ?? image:image).resizable()
-                            if ["对比","试压"].contains(mode),let after=shots.after {
+                            Image(nsImage:mode=="成品" && sameResult ? shots.after ?? image:image).resizable()
+                            if ["对比","试压"].contains(mode),sameResult,let after=shots.after {
                                 Image(nsImage:after).resizable().frame(width:w,height:h)
                                     .mask(alignment:.trailing) {Rectangle().frame(width:w*(1-position))}
-                                Rectangle().fill(teal).frame(width:2,height:h).offset(x:w*position-1)
-                                Image(systemName:"arrow.left.and.right").font(.system(size:13,weight:.bold))
-                                    .foregroundStyle(.white).frame(width:33,height:33).background(teal,in:Circle())
+                                ZStack {
+                                    Rectangle().fill(teal).frame(width:2)
+                                    Image(systemName:"arrow.left.and.right").font(.system(size:13,weight:.bold))
+                                        .foregroundStyle(.white).frame(width:30,height:30).background(teal,in:Circle())
+                                }.frame(width:30,height:h).contentShape(Rectangle())
                                     .position(x:w*position,y:h/2)
-                                HStack { badge("原稿");Spacer();badge(mode=="试压" ? "参数试压":"压缩后") }.padding(9).frame(width:w,height:h,alignment:.top)
+                                    .accessibilityLabel("拖动以比较原稿与压缩后画面")
+                                    .gesture(DragGesture(coordinateSpace:.named("pdfCompare")).onChanged { value in
+                                        if dragOrigin == nil {dragOrigin=position}
+                                        position=max(0,min(1,(dragOrigin ?? position)+value.translation.width/w))
+                                    }.onEnded { _ in dragOrigin=nil })
+                                HStack { badge("原稿");Spacer();badge(mode=="试压" ? "参数试压":"压缩后") }.padding(9).frame(width:w,height:h,alignment:.top).allowsHitTesting(false)
                             }
                         }.frame(width:w,height:h).background(.white).shadow(color:.black.opacity(0.15),radius:7,y:2)
-                        .contentShape(Rectangle())
-                        .simultaneousGesture(DragGesture(minimumDistance:0,coordinateSpace:.local).onChanged{v in
-                            if ["对比","试压"].contains(mode) { position=max(0,min(1,v.location.x/w)) }
-                        })
                         .padding(24).frame(minWidth:geo.size.width,minHeight:geo.size.height)
                     }
-                } else if failed { Label("当前页预览不可用",systemImage:"doc.badge.ellipsis") }
+                } else if currentFailure { Label("当前页预览不可用",systemImage:"doc.badge.ellipsis") }
                 else { ProgressView().controlSize(.small) }
-            }.task(id:key) {
+                if displayed != nil && (loading || currentFailure) {
+                    VStack {
+                        HStack {
+                            Spacer()
+                            Label(currentFailure ? "预览更新失败，请切回原稿重试":"正在更新预览",
+                                  systemImage:currentFailure ? "exclamationmark.triangle":"arrow.triangle.2.circlepath")
+                                .font(.caption).padding(7).background(.regularMaterial,in:RoundedRectangle(cornerRadius:5))
+                        }
+                        Spacer()
+                    }.padding(12).allowsHitTesting(false)
+                }
+            }.coordinateSpace(name:"pdfCompare").task(id:key) {
+                renderingKey=key
                 failed=false
-                shots=nil
+                loading=true
                 let result=await Task.detached(priority:.userInitiated) { () -> Shots? in
                     func draw(_ url:URL)->NSImage? {
                         guard let page=PDFDocument(url:url)?.page(at:key.page) else{return nil}
@@ -72,10 +96,12 @@ struct PreviewCanvas:View {
                         return page.thumbnail(of:CGSize(width:rect.width*factor,height:rect.height*factor),for:.cropBox)
                     }
                     guard let before=draw(key.original) else{return nil}
-                    return Shots(before:before,after:key.result.flatMap(draw))
+                    return Shots(key:key,before:before,after:key.result.flatMap(draw))
                 }.value
                 guard !Task.isCancelled else{return}
-                shots=result; failed=result==nil
+                shots=result
+                loading=false
+                failed=result==nil || (key.result != nil && result?.after == nil)
             }
         }
     }
