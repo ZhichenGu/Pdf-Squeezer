@@ -5,7 +5,7 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>zh_CN</string>
 	<key>CFBundleDisplayName</key>
-	<string>PDF压缩</string>
+	<string>轻压</string>
 	<key>CFBundleDocumentTypes</key>
 	<array>
 		<dict>
@@ -28,13 +28,13 @@
 	<key>CFBundleIdentifier</key>
 	<string>local.sfk.pdfcompressor</string>
 	<key>CFBundleName</key>
-	<string>PDF压缩</string>
+	<string>轻压</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
 	<string>1.3</string>
 	<key>CFBundleVersion</key>
-	<string>6</string>
+	<string>8</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>14.0</string>
 	<key>NSAppTransportSecurity</key>

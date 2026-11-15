@@ -42,7 +42,9 @@ def build():
         stage=Path(temp)
         run("tar","-xzf",archive,"-C",stage)
         python=stage/"python"
-        app=stage/"PDF压缩.app"
+        with open(ROOT/"Resources/Info.plist", "rb") as file:
+            app_name=plistlib.load(file)["CFBundleName"]
+        app=stage/(app_name+".app")
         contents=app/"Contents"
         bin_dir=contents/"MacOS"
         res=contents/"Resources"
@@ -68,7 +70,7 @@ def build():
         swift=["xcrun","swiftc","-swift-version","5","-O","-target","arm64-apple-macos14.0","-module-cache-path",BUILD/"swift-cache"]
         source=ROOT/"Sources"
         run(*swift,source/"Raster.swift","-o",res/"PageRender")
-        run(*swift,*[source/n for n in ("App.swift","Model.swift","Preview.swift","SizeWarning.swift")],"-o",bin_dir/"PaperPress")
+        run(*swift,*[source/n for n in ("App.swift","Model.swift","Preview.swift","SizeWarning.swift","Workspace.swift")],"-o",bin_dir/"PaperPress")
         run(runtime/"bin/python3.12","-B","-c","from PIL import Image; from pypdf import PdfReader; Image.new('RGB',(2,2)).tobytes()")
         run("codesign","--force","--deep","--sign","-",app)
         run("codesign","--verify","--strict","--deep",app)

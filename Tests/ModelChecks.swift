@@ -11,6 +11,19 @@ import PDFKit
         fatalError("任务等待超时")
     }
     @MainActor static func main() async throws {
+        precondition(sidebarWidthFor(preferred:400,available:1100)==400)
+        precondition(sidebarWidthFor(preferred:400,available:860)==372)
+        precondition(sidebarWidthFor(preferred:400,available:1100)==400)
+        precondition(sidebarWidthFor(preferred:200,available:1100)==306)
+        precondition(sidebarWidthFor(preferred:900,available:1100)==460)
+        precondition(sidebarWidthFor(preferred:.nan,available:1100)==340)
+        let divider=DividerView(frame:.zero)
+        divider.width=400;divider.maximum=410
+        var adjusted:CGFloat=0
+        divider.resize={adjusted=$0}
+        precondition(divider.accessibilityPerformIncrement() && adjusted==410)
+        divider.width=306
+        precondition(divider.accessibilityPerformDecrement() && adjusted==306)
         let root=URL(fileURLWithPath:CommandLine.arguments[1])
         let source=root.appendingPathComponent("model.pdf")
         let domain="local.pdfcompressor.tests."+UUID().uuidString

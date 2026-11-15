@@ -54,4 +54,4 @@ jobs:
         run: |
           version=$(plutil -extract CFBundleShortVersionString raw Resources/Info.plist)
           tag="v$version"
-          gh release create "$tag" dist/*.zip dist/*.sha256 --target "$GITHUB_SHA" --title "PDF压缩 $tag" --notes-file "releases/$tag.md"
+          gh release create "$tag" dist/*.zip dist/*.sha256 --target "$GITHUB_SHA" --title "轻压 $tag" --notes-file "releases/$tag.md"

@@ -1,6 +1,7 @@
 import SwiftUI
 import UniformTypeIdentifiers
 import PDFKit
+import AppKit
 
 struct DropArea: ViewModifier {
     @ObservedObject var desk: Desk
@@ -154,6 +155,7 @@ struct FileRow: View {
 
 struct DeskView: View {
     @ObservedObject var desk: Desk
+    @AppStorage("sidebarWidth") private var sidebarWidth = 340.0
     @State private var hover = false
     @State private var settings = false
     @State private var showLinks = false
@@ -163,7 +165,7 @@ struct DeskView: View {
         VStack(spacing: 0) {
             HStack(spacing: 8) {
                 Image(systemName: "doc.zipper").foregroundStyle(teal).font(.system(size: 18))
-                Text("PDF压缩").font(.system(size: 17, weight: .semibold))
+                Text("轻压").font(.system(size: 17, weight: .semibold))
                 if let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String {
                     Text("版本 V"+version).font(.caption).foregroundStyle(muted)
                 }
@@ -172,9 +174,15 @@ struct DeskView: View {
                     .disabled(desk.busy).popover(isPresented: $settings) { SettingsPanel(desk: desk) }
             }.padding(.horizontal, 16).frame(height: 48)
             Divider()
-            HSplitView {
-                sidebar.frame(minWidth: 306, idealWidth: 340, maxWidth: 460)
-                right.frame(minWidth: 480, maxWidth: .infinity, maxHeight: .infinity)
+            GeometryReader { geometry in
+                let width = sidebarWidthFor(preferred: sidebarWidth, available: geometry.size.width)
+                HStack(spacing: 0) {
+                    sidebar.frame(width: width)
+                    WorkspaceDivider(width: width, maximum: min(460, geometry.size.width - 488)) {
+                        sidebarWidth = Double($0)
+                    }.frame(width: 8)
+                    right.frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
             }
         }.foregroundStyle(ink).background(.white).tint(teal).preferredColorScheme(.light)
             .frame(minWidth: 860, minHeight: 600)
@@ -193,7 +201,7 @@ struct DeskView: View {
                     desk.afterWarning = { desk.force(warning) }; desk.warning = nil
                 }, cancel: { desk.warning = nil })
             }
-            .alert("PDF压缩", isPresented: Binding(
+            .alert("轻压", isPresented: Binding(
                 get: { !desk.notice.isEmpty }, set: { if !$0 { desk.notice = "" } })) {
                     Button("好") { desk.notice = "" }
                 } message: { Text(desk.notice) }
@@ -368,7 +376,7 @@ struct DeskView: View {
     @NSApplicationDelegateAdaptor(DeskDelegate.self) var delegate
     @StateObject private var desk = Desk.shared
     var body: some Scene {
-        Window("PDF压缩", id: "desk") {
+        Window("轻压", id: "desk") {
             DeskView(desk: desk).onOpenURL { desk.add([$0]) }
                 .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
                     desk.stop(); desk.persist()

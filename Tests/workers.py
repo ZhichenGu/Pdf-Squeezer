@@ -2,6 +2,7 @@
 import io
 import json
 import os
+import plistlib
 from pathlib import Path
 import subprocess
 import sys
@@ -17,7 +18,9 @@ from pypdf.generic import (ArrayObject,DictionaryObject,DecodedStreamObject,
 from linkaudit import inventory
 from preflight import clean
 
-APP=ROOT/"dist/PDF压缩.app/Contents/Resources"
+with open(ROOT/"Resources/Info.plist", "rb") as file:
+    app_name=plistlib.load(file)["CFBundleName"]
+APP=ROOT/"dist"/(app_name+".app")/"Contents/Resources"
 
 
 def fixture(path):
