@@ -63,14 +63,14 @@ struct SizeEstimate: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
             if let file = desk.current {
-                Text("试压文件 · "+file.source.lastPathComponent)
+                Text("当前画质试压 · "+file.source.lastPathComponent)
                     .font(.caption).lineLimit(1).truncationMode(.middle).help(file.source.lastPathComponent)
                 if desk.plan == desk.estimateKey, let bytes = desk.estimateBytes {
                     Text(sizeText(file.bytes)+" → "+sizeText(bytes))
                         .font(.callout.weight(.semibold)).monospacedDigit()
-                    Text(desk.adaptive && bytes > (desk.limit ?? 0) ? "当前参数仍超标，正式压缩会继续调整。" : "按当前质量和 DPI 试压。")
+                    Text(desk.adaptive ? "未包含目标自动调整；正式压缩会继续搜索画质。" : "按当前质量和 DPI 压缩，未启用目标自动调整。")
                         .font(.caption).foregroundStyle(muted)
-                    Button("查看试压对比") { desk.mode = "试压"; dismiss() }
+                    Button("查看当前画质对比") { desk.mode = "试压"; dismiss() }
                 } else if desk.plan == nil {
                     Text("先在文件行填写有效的目标 MB。").font(.caption).foregroundStyle(muted)
                 } else if !desk.estimateError.isEmpty {
@@ -85,7 +85,7 @@ struct SizeEstimate: View {
                 Text("添加文件后即可试压").font(.caption).foregroundStyle(muted)
             }
             Spacer(minLength: 0)
-        }.frame(height: 105, alignment: .topLeading)
+        }.frame(minHeight: 112, alignment: .topLeading)
     }
 }
 
@@ -96,6 +96,7 @@ struct FileRow: View {
     private var status: String {
         if invalid { return "目标无效" }
         if !file.message.isEmpty { return file.message }
+        if desk.resultNeedsUpdate(file) { return "成品待更新" }
         if file.result != nil {
             return file.resultBytes <= (desk.effectiveLimit(file) ?? 0) ? "已达标" : "超出目标"
         }
@@ -213,7 +214,7 @@ struct DeskView: View {
                 Text("文件").font(.headline)
                 Text("\(desk.files.count)").font(.caption).foregroundStyle(muted)
                 Spacer()
-                Button("添加…") { desk.choose() }.buttonStyle(.borderless)
+                if !desk.files.isEmpty { Button("添加…") { desk.choose() }.buttonStyle(.borderless) }
             }.padding(.horizontal, 16).frame(height: 44)
             if desk.files.isEmpty {
                 Button { desk.choose() } label: {
@@ -244,22 +245,28 @@ struct DeskView: View {
             .modifier(DropArea(desk: desk, hovering: $hover))
     }
 
+    private var exportReady: Bool {
+        !desk.checked.isEmpty && desk.checked.allSatisfy { $0.result != nil && !desk.resultNeedsUpdate($0) }
+    }
+    private var hasResults: Bool { desk.checked.contains { $0.result != nil } }
     private var controls: some View {
-        VStack(spacing: 8) {
-            HStack {
-                Text("所选文件").font(.caption.weight(.semibold))
-                Spacer()
-                Button("批量设定…") { batchOptions.toggle() }.disabled(desk.checked.isEmpty || desk.busy)
-                    .popover(isPresented: $batchOptions) {
-                        VStack(alignment: .leading, spacing: 12) {
-                            Text("统一填写所选文件的单份目标").font(.headline)
-                            HStack { TextField("10", text: $desk.batchTarget).frame(width: 86); Text("MB") }
-                            Button("应用到 \(desk.checked.count) 份文件") { desk.applyBatchTarget(); batchOptions = false }
-                                .disabled(desk.bytesFromMB(desk.batchTarget) == nil)
-                        }.padding(18)
-                    }
-            }.frame(height: 24)
-            HStack(alignment: .center, spacing: 8) {
+        VStack(spacing: 7) {
+            if desk.files.count > 1 {
+                HStack {
+                    Text("已勾选 \(desk.checked.count) 份").font(.caption).foregroundStyle(muted)
+                    Spacer()
+                    Button("批量设定…") { batchOptions.toggle() }.disabled(desk.checked.isEmpty || desk.busy)
+                        .popover(isPresented: $batchOptions) {
+                            VStack(alignment: .leading, spacing: 12) {
+                                Text("统一填写所选文件的单份目标").font(.headline)
+                                HStack { TextField("10", text: $desk.batchTarget).frame(width: 86); Text("MB") }
+                                Button("应用到 \(desk.checked.count) 份文件") { desk.applyBatchTarget(); batchOptions = false }
+                                    .disabled(desk.bytesFromMB(desk.batchTarget) == nil)
+                            }.padding(18)
+                        }
+                }.frame(height: 24)
+            }
+            HStack(spacing: 8) {
                 if desk.busy { ProgressView().controlSize(.mini) }
                 Text(feedback).font(.caption).foregroundStyle(muted).lineLimit(2)
                     .frame(maxWidth: .infinity, alignment: .leading).help(feedback)
@@ -267,17 +274,21 @@ struct DeskView: View {
                     Button(desk.stopping ? "正在停止…" : "停止") { desk.stop() }.disabled(desk.stopping)
                 } else if desk.files.contains(where: { $0.message == "处理失败" }) {
                     Button("重试失败文件") { desk.retryFailures() }
+                } else if desk.checkLimits(desk.checked.filter { $0.result != nil }) != nil {
+                    Button("处理超限…") { desk.resolveLimits(desk.checked) }
                 }
-            }.frame(height: 36)
-            Button { desk.start() } label: {
-                Text(desk.busy ? "正在压缩" : "压缩所选文件（\(desk.checked.count)）")
+            }.frame(height: 30)
+            Button {
+                if exportReady { desk.export(desk.checked) } else { desk.start() }
+            } label: {
+                Text(desk.busy ? "正在压缩" : exportReady ? "导出成品（\(desk.checked.count)）" : hasResults ? "按新参数重新压缩（\(desk.checked.count)）" : "压缩所选文件（\(desk.checked.count)）")
                     .font(.system(size: 13, weight: .semibold)).frame(maxWidth: .infinity).frame(height: 34)
                     .foregroundStyle(.white).background(teal, in: RoundedRectangle(cornerRadius: 6))
             }.buttonStyle(.plain).disabled(desk.busy || desk.checked.isEmpty || desk.goals == nil)
-            Button { desk.export(desk.checked) } label: {
-                Label("导出已勾选的成品", systemImage: "square.and.arrow.up").frame(maxWidth: .infinity)
-            }.disabled(desk.busy || !desk.checked.contains(where: { $0.result != nil })).frame(height: 25)
-        }.padding(14)
+            Button(exportReady ? "重新压缩" : "导出已有成品…") {
+                if exportReady { desk.start() } else { desk.export(desk.checked) }
+            }.disabled(desk.busy || !hasResults).frame(height: 25)
+        }.padding(12)
     }
 
     private var feedback: String {
@@ -340,14 +351,25 @@ struct DeskView: View {
                     Button { desk.edit(file.id) { $0.page += 1 } } label: { Image(systemName: "chevron.right") }
                         .disabled(file.page+1 >= file.pages).help("下一页").accessibilityLabel("下一页")
                     Spacer()
-                    if let cap = desk.effectiveLimit(file), file.result != nil {
-                        Label(file.resultBytes <= cap ? "已达标" : "超出目标",
-                              systemImage: file.resultBytes <= cap ? "checkmark.circle" : "exclamationmark.triangle")
-                            .font(.caption).foregroundStyle(file.resultBytes <= cap ? muted : .orange)
-                        Text(sizeText(file.resultBytes)).font(.callout.weight(.semibold))
+                    Text(desk.preview(for:file).title+" · "+sizeText(desk.preview(for:file).bytes))
+                        .font(.caption.monospacedDigit()).lineLimit(1)
+                }.padding(.horizontal, 12).frame(height: 34)
+                HStack(spacing: 8) {
+                    if desk.resultNeedsUpdate(file) {
+                        Text("参数已更改，成品尚未更新").font(.caption).foregroundStyle(muted).lineLimit(1)
+                    } else if file.result != nil, let cap=desk.effectiveLimit(file) {
+                        Label(file.resultBytes <= cap ? "成品已达标" : "成品超出目标",
+                              systemImage:file.resultBytes <= cap ? "checkmark.circle":"exclamationmark.triangle")
+                            .font(.caption).foregroundStyle(file.resultBytes <= cap ? muted:.orange)
                     }
-                    Button("导出…") { desk.export([file]) }.disabled(desk.busy || file.result == nil)
-                }.padding(.horizontal, 12).frame(height: 40)
+                    Spacer(minLength: 0)
+                    if file.result != nil, desk.checkLimits([file]) != nil {
+                        Button("处理超限…") { desk.resolveLimits([file]) }.disabled(desk.busy)
+                    }
+                    Button(desk.isShowingResult(file) ? (desk.resultNeedsUpdate(file) ? "导出已有成品…":"导出成品…") : "查看已有成品") {
+                        desk.viewOrExport(file)
+                    }.disabled(desk.busy || file.result == nil)
+                }.padding(.horizontal, 12).frame(height: 30)
                 HStack {
                     Text(desk.exportMessage).font(.caption).lineLimit(1).frame(maxWidth: .infinity, alignment: .leading)
                     Button("在 Finder 中显示") { desk.revealExport() }.buttonStyle(.borderless)
@@ -361,7 +383,7 @@ struct DeskView: View {
             VStack(spacing: 12) {
                 Image(systemName: "doc.badge.plus").font(.system(size: 32)).foregroundStyle(muted)
                 Text("拖入 PDF 开始预览").font(.headline)
-                Button("选择 PDF…") { desk.choose() }
+                Text("从左侧添加文件，也可直接拖到这里").font(.caption).foregroundStyle(muted)
             }.frame(maxWidth: .infinity, maxHeight: .infinity).background(field)
                 .modifier(DropArea(desk: desk, hovering: $hover))
         }

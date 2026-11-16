@@ -38,7 +38,7 @@ struct PreviewCanvas:View {
             let key=PreviewKey(original:f.source,result:mode=="试压" ? draft:f.result,page:f.page,scale:resolution)
             let currentFailure=failed && renderingKey == key
             let displayed=shots.flatMap { value in
-                value.key.original == key.original && value.key.page == key.page ? value:nil
+                value.key.original == key.original && value.key.page == key.page && (mode == "原稿" || value.key.result == key.result) ? value:nil
             }
             ZStack {
                 field
@@ -64,10 +64,10 @@ struct PreviewCanvas:View {
                                         if dragOrigin == nil {dragOrigin=position}
                                         position=max(0,min(1,(dragOrigin ?? position)+value.translation.width/w))
                                     }.onEnded { _ in dragOrigin=nil })
-                                HStack { badge("原稿");Spacer();badge(mode=="试压" ? "参数试压":"压缩后") }.padding(9).frame(width:w,height:h,alignment:.top).allowsHitTesting(false)
+
                             }
                         }.frame(width:w,height:h).background(.white).shadow(color:.black.opacity(0.15),radius:7,y:2)
-                        .padding(24).frame(minWidth:geo.size.width,minHeight:geo.size.height)
+                        .padding(.horizontal,24).padding(.vertical,34).frame(minWidth:geo.size.width,minHeight:geo.size.height)
                     }
                 } else if currentFailure { Label("当前页预览不可用",systemImage:"doc.badge.ellipsis") }
                 else { ProgressView().controlSize(.small) }
@@ -81,6 +81,15 @@ struct PreviewCanvas:View {
                         }
                         Spacer()
                     }.padding(12).allowsHitTesting(false)
+                }
+            }.overlay(alignment:.top) {
+                if ["试压","对比"].contains(mode) {
+                    HStack {
+                        Text("原稿")
+                        Spacer()
+                        Text(mode == "试压" ? "当前画质试压":"成品")
+                    }.font(.caption).foregroundStyle(muted).padding(.horizontal,14)
+                        .frame(height:24).background(field).allowsHitTesting(false)
                 }
             }.coordinateSpace(name:"pdfCompare").task(id:key) {
                 renderingKey=key

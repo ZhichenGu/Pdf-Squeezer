@@ -10,6 +10,27 @@ struct LinkInfo: Decodable {
     var problem: Bool
 }
 
+struct ResultSettings: Codable, Equatable {
+    let dpi: Int
+    let quality: Int
+    let adaptive: Bool
+    let target: Int64
+}
+
+struct PreviewSelection {
+    let title: String
+    let url: URL
+    let bytes: Int64
+}
+
+func exportName(for source: URL) -> String {
+    var title = source.deletingPathExtension().lastPathComponent
+    while title.hasSuffix("（压缩版）") || title.hasSuffix("(压缩版)") {
+        title = String(title.dropLast(5))
+    }
+    return title + "（压缩版）.pdf"
+}
+
 struct FileItem: Identifiable {
     let id = UUID()
     let source: URL
@@ -20,6 +41,7 @@ struct FileItem: Identifiable {
     var targetMB = "10"
     var checked = true
     var result: URL?
+    var resultSettings: ResultSettings?
     var resultBytes: Int64 = 0
     var limit: Int64 = 0
     var message = ""
@@ -108,6 +130,31 @@ struct EstimatePlan:Hashable {
         return EstimatePlan(file:f.id,target:target,dpi:Int(dpi),quality:Int(quality),modified:(try? f.source.resourceValues(forKeys:[.contentModificationDateKey]))?.contentModificationDate)
     }
     var validEstimate:URL? {estimateKey == plan ? estimateURL:nil}
+    func settings(for file: FileItem) -> ResultSettings {
+        ResultSettings(dpi:Int(dpi),quality:Int(quality),adaptive:adaptive,target:effectiveLimit(file) ?? 0)
+    }
+    func resultNeedsUpdate(_ file: FileItem) -> Bool {
+        file.result != nil && file.resultSettings != settings(for:file)
+    }
+    func preview(for file: FileItem) -> PreviewSelection {
+        if mode == "试压", estimateKey?.file == file.id, let draft=validEstimate, let bytes=estimateBytes {
+            return PreviewSelection(title:"当前画质试压",url:draft,bytes:bytes)
+        }
+        if ["对比","成品"].contains(mode), let result=file.result {
+            return PreviewSelection(title:resultNeedsUpdate(file) ? "已有成品":"成品",url:result,bytes:file.resultBytes)
+        }
+        return PreviewSelection(title:"原稿",url:file.source,bytes:file.bytes)
+    }
+    func isShowingResult(_ file:FileItem) -> Bool {
+        ["成品","对比"].contains(mode) && file.result != nil && preview(for:file).url == file.result
+    }
+    func viewOrExport(_ file:FileItem) {
+        guard file.result != nil else{return}
+        if isShowingResult(file) {export([file])} else {mode="成品"}
+    }
+    func resolveLimits(_ items: [FileItem]) {
+        if let problem=checkLimits(items.filter{$0.result != nil}) { warning=problem }
+    }
     func estimateCurrent() async {
         guard let f=current,let key=plan,estimateKey != key || estimateBytes==nil else{return}
         if mode=="试压" {mode="原稿"}
@@ -163,7 +210,7 @@ struct EstimatePlan:Hashable {
     init(defaults:UserDefaults = .standard, storage:URL? = nil) {
         self.defaults = defaults
         temp = storage ?? FileManager.default.urls(for:.applicationSupportDirectory,in:.userDomainMask)[0]
-            .appendingPathComponent("PDF-Squeezer/Results")
+            .appendingPathComponent(Bundle.main.bundleIdentifier == "local.sfk.pdfcompressor" ? "PDF-Squeezer/Results" : (Bundle.main.bundleIdentifier ?? "Qingya")+"/Results")
         do { try FileManager.default.createDirectory(at:temp,withIntermediateDirectories:true) }
         catch { memoryError="无法创建结果保存目录："+error.localizedDescription }
         if let data=defaults.data(forKey:"session-v12"),let saved=try? JSONDecoder().decode(SavedSession.self,from:data) {
@@ -182,7 +229,7 @@ struct EstimatePlan:Hashable {
                 if unchanged,let name=record.result, !name.contains("/"),name.hasSuffix(".pdf") {
                     let result=temp.appendingPathComponent(name)
                     if let resultDoc=PDFDocument(url:result),resultDoc.pageCount==file.pages {
-                        file.result=result;file.resultBytes=byteCount(result);file.limit=record.limit
+                        file.result=result;file.resultBytes=byteCount(result);file.limit=record.limit;file.resultSettings=record.resultSettings
                     }
                 }
                 files.append(file)
@@ -197,7 +244,7 @@ struct EstimatePlan:Hashable {
         guard !restoring else{return}
         let records=files.map {f in SavedFile(path:f.source.path,target:f.targetMB,checked:f.checked,
             page:f.page,bytes:f.bytes,modified:modification(f.source),
-            result:f.result?.lastPathComponent,limit:f.limit,message:f.message,retryStrong:f.retryStrong)}
+            result:f.result?.lastPathComponent,limit:f.limit,message:f.message,retryStrong:f.retryStrong,resultSettings:f.resultSettings)}
         let state=SavedSession(quality:quality,dpi:dpi,adaptive:adaptive,batchTarget:batchTarget,
             outputFolder:outputFolder,files:records)
         if let data=try? JSONEncoder().encode(state) {defaults.set(data,forKey:"session-v12")}
@@ -291,6 +338,7 @@ struct EstimatePlan:Hashable {
         guard targets.count == list.count else {return}
         let goals=Dictionary(uniqueKeysWithValues:targets)
         let settings=[String(Int(dpi)),String(Int(quality)),adaptive ? "1":"0"]
+        let recipes=Dictionary(uniqueKeysWithValues:list.map{($0.id,self.settings(for:$0))})
         if mode=="试压" {mode="原稿"}
         busy=true;stopping=false;batchSummary=""
         batchTask=Task {
@@ -317,7 +365,7 @@ struct EstimatePlan:Hashable {
                     }
                     try Task.checkCancellation()
                     guard let doc=PDFDocument(url:out),doc.pageCount==f.pages else { throw NSError(domain:"PDF",code:2,userInfo:[NSLocalizedDescriptionKey:"输出文档校验失败"]) }
-                    edit(f.id){$0.result=out; $0.resultBytes=byteCount(out); $0.limit=goal; $0.message=""}
+                    edit(f.id){$0.result=out; $0.resultBytes=byteCount(out); $0.limit=goal; $0.resultSettings=recipes[f.id]; $0.message=""}
                     completedIDs.insert(f.id)
                     if focus==f.id {mode="对比"}
                 } catch {
@@ -349,6 +397,7 @@ struct EstimatePlan:Hashable {
         guard !busy else{return}
         busy=true;stopping=false
         focusOn(request.issues[0].file)
+        let recipes=Dictionary(uniqueKeysWithValues:request.issues.map{($0.id,settings(for:$0.file))})
         batchTask=Task {
             var failures=[String]()
             for (i,issue) in request.issues.enumerated() {
@@ -368,7 +417,7 @@ struct EstimatePlan:Hashable {
                     guard bytes>0,bytes<=issue.target,let doc=PDFDocument(url:out),doc.pageCount==file.pages else {
                         throw NSError(domain:"PDF",code:2,userInfo:[NSLocalizedDescriptionKey:"强压结果未通过大小或页数校验。"])
                     }
-                    edit(file.id){$0.result=out; $0.resultBytes=bytes; $0.limit=issue.target; $0.message=""}
+                    edit(file.id){$0.result=out; $0.resultBytes=bytes; $0.limit=issue.target; $0.resultSettings=recipes[file.id]; $0.message=""}
                 } catch {
                     try? FileManager.default.removeItem(at:out)
                     if Task.isCancelled {edit(file.id){$0.message="已停止"};break}
@@ -386,12 +435,35 @@ struct EstimatePlan:Hashable {
         }
     }
     func saveResults(_ ready:[FileItem]) {
-        let panel=NSOpenPanel(); panel.canChooseFiles=false; panel.canChooseDirectories=true; panel.canCreateDirectories=true
+        if ready.count == 1, let file=ready.first {
+            let panel=NSSavePanel()
+            panel.title="导出成品"; panel.prompt="导出"
+            panel.allowedContentTypes=[.pdf]; panel.canCreateDirectories=true
+            panel.nameFieldStringValue=exportName(for:file.source)
+            if !outputFolder.isEmpty {panel.directoryURL=URL(fileURLWithPath:outputFolder)}
+            guard panel.runModal() == .OK, let target=panel.url else{return}
+            saveResult(file,to:target)
+            return
+        }
+        let panel=NSOpenPanel(); panel.title="选择成品保存文件夹"; panel.canChooseFiles=false; panel.canChooseDirectories=true; panel.canCreateDirectories=true
         panel.prompt="导出到此处"
         if !outputFolder.isEmpty {panel.directoryURL=URL(fileURLWithPath:outputFolder)}
         guard panel.runModal() == .OK,let dir=panel.url else { return }
         outputFolder=dir.path
         saveResults(ready,to:dir)
+    }
+    func saveResult(_ file:FileItem,to target:URL) {
+        guard let result=file.result else{return}
+        guard target.resolvingSymlinksInPath().standardizedFileURL != file.source.resolvingSymlinksInPath().standardizedFileURL else {
+            notice="请选择其他文件名，保留原稿。";return
+        }
+        exportedFiles=[];exportMessage=""
+        do {
+            // The save panel handles replacement confirmation before this write.
+            try Data(contentsOf:result,options:.mappedIfSafe).write(to:target,options:.atomic)
+            exportedFiles=[target];outputFolder=target.deletingLastPathComponent().path
+            exportMessage="已导出 1 份 PDF"
+        } catch {notice=error.localizedDescription}
     }
     func saveResults(_ ready:[FileItem],to directory:URL) {
         exportedFiles=[]
@@ -399,7 +471,7 @@ struct EstimatePlan:Hashable {
         do {
             for file in ready {
                 guard let result=file.result else {continue}
-                let title=file.source.deletingPathExtension().lastPathComponent+"（压缩版）"
+                let title=URL(fileURLWithPath:exportName(for:file.source)).deletingPathExtension().lastPathComponent
                 var number=1
                 while true {
                     let name=number==1 ? title:title+"-"+String(number)
@@ -479,6 +551,7 @@ private struct SavedFile:Codable {
     let limit:Int64
     let message:String?
     let retryStrong:Bool?
+    let resultSettings:ResultSettings?
 }
 private struct SavedSession:Codable {
     let quality:Double

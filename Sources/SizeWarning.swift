@@ -22,30 +22,40 @@ struct SizeWarningPanel:View {
         VStack(alignment:.leading,spacing:16) {
             Label("压缩结果超过目标",systemImage:"exclamationmark.triangle.fill")
                 .font(.title2.bold()).foregroundStyle(ink)
-            ScrollView {
-                VStack(alignment:.leading,spacing:12) {
-                    ForEach(warning.issues){ issue in
-                        VStack(alignment:.leading,spacing:5){
-                            Text(issue.file.source.lastPathComponent).lineLimit(2)
-                            Text("当前 "+sizeText(issue.file.resultBytes)+"　目标 "+sizeText(issue.target)+"　超出 "+sizeText(issue.file.resultBytes-issue.target))
-                                .font(.callout.monospacedDigit()).foregroundStyle(.secondary)
-                        }.frame(maxWidth:.infinity,alignment:.leading)
-                    }
-                }
-            }.frame(height:min(CGFloat(warning.issues.count)*59,190))
+            if warning.issues.count == 1 {
+                issuesList
+            } else {
+                ScrollView { issuesList }.frame(height:min(CGFloat(warning.issues.count)*80,190))
+            }
             if let summary=warning.issues.first?.file.analysis, !summary.isEmpty {
                 Text("文件组成 · "+summary).font(.caption).foregroundStyle(.secondary)
             }
             Divider()
-            Text("强力压缩会先清理资源并尝试保留矢量。仍超标时将页面画面转为图片，保留可搜索文字和链接，放大时细节可能变软。完成后可先对比再导出。")
+            Text("强力压缩可能降低放大后的细节，可搜索文字和链接会保留。完成后可先对比再导出。")
                 .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal:false,vertical:true)
             HStack {
                 Button("取消",action:cancel).keyboardShortcut(.cancelAction)
                 Spacer()
                 Button("调整参数",action:adjust)
                 Button("强力压缩",action:retry)
-                Button("导出 "+sizeText(warning.bytes),action:accept)
+                Button("仍导出 "+sizeText(warning.bytes),action:accept)
             }
         }.padding(24).frame(width:550)
     }
+    private var issuesList: some View {
+        VStack(alignment:.leading,spacing:12) {
+                    ForEach(warning.issues){ issue in
+                        VStack(alignment:.leading,spacing:5){
+                            Text(issue.file.source.lastPathComponent).lineLimit(2)
+                            HStack(spacing:8) {
+                                Text(sizeText(issue.file.resultBytes)).foregroundStyle(.orange)
+                                Image(systemName:"arrow.right").font(.caption).foregroundStyle(.secondary)
+                                Text("目标 "+sizeText(issue.target))
+                            }.font(.system(size:16,weight:.semibold)).monospacedDigit()
+                            Text("超出 "+sizeText(issue.file.resultBytes-issue.target)).font(.caption).foregroundStyle(.secondary)
+                        }.frame(maxWidth:.infinity,alignment:.leading)
+                    }
+        }
+    }
+
 }
